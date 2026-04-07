@@ -29,17 +29,71 @@ type MenuItem = {
   name: string;
   description: string;
   category: CategoryId;
-  price_small: number;
-  price_large: number;
+  sizes: number[];
+  prices: Record<string, number>;
 };
 
 type CartItem = {
   id: string;
   name: string;
-  size: '12oz' | '24oz';
+  /** Fluid ounces for this line item. */
+  size: number;
   supplements: string[];
   price: number;
 };
+
+function normalizePrices(value: unknown): Record<string, number> {
+  if (value == null || typeof value !== 'object') {
+    return {};
+  }
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
+    if (Number.isFinite(n)) {
+      out[k] = n;
+    }
+  }
+  return out;
+}
+
+function normalizeMenuItemRow(row: {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  sizes?: unknown;
+  prices?: unknown;
+}): MenuItem {
+  const rawSizes = Array.isArray(row.sizes) ? row.sizes : [];
+  const sizes = rawSizes
+    .map((s) => (typeof s === 'number' ? s : Number(s)))
+    .filter((n) => Number.isFinite(n))
+    .sort((a, b) => a - b);
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    category: row.category as CategoryId,
+    sizes,
+    prices: normalizePrices(row.prices),
+  };
+}
+
+function priceForOz(prices: Record<string, number>, oz: number): number {
+  return prices[String(oz)] ?? 0;
+}
+
+function sortedSizes(item: MenuItem): number[] {
+  return [...item.sizes].sort((a, b) => a - b);
+}
+
+function lowestListedPrice(item: MenuItem): number {
+  const ozList = sortedSizes(item);
+  if (ozList.length === 0) {
+    return 0;
+  }
+  return Math.min(...ozList.map((oz) => priceForOz(item.prices, oz)));
+}
 
 const LOCATIONS: Location[] = [
   { id: 'downtown', name: 'Downtown SB', address: '720 State St', hours: '7a–10p' },
@@ -68,7 +122,7 @@ export default function OrderScreen() {
   const [selectedLocation, setSelectedLocation] = useState<Location | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<CategoryId | null>(null);
   const [selectedItem, setSelectedItem] = useState<MenuItem | null>(null);
-  const [size, setSize] = useState<'12oz' | '24oz'>('12oz');
+  const [selectedSizeOz, setSelectedSizeOz] = useState<number | null>(null);
   const [selectedSupplements, setSelectedSupplements] = useState<string[]>([]);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
@@ -76,8 +130,8 @@ export default function OrderScreen() {
   const [isLoadingCategoryItems, setIsLoadingCategoryItems] = useState(false);
 
   const currentItemTotal =
-    selectedItem != null
-      ? (size === '24oz' ? selectedItem.price_large : selectedItem.price_small) +
+    selectedItem != null && selectedSizeOz != null
+      ? priceForOz(selectedItem.prices, selectedSizeOz) +
         selectedSupplements.reduce((sum, id) => {
           const sup = SUPPLEMENTS.find((s) => s.id === id);
           return sum + (sup?.price ?? 0);
@@ -99,7 +153,7 @@ export default function OrderScreen() {
 
     const { data, error } = await supabase
       .from('menu_items')
-      .select('id, name, description, category, price_small, price_large')
+      .select('id, name, description, category, sizes, prices')
       .eq('category', category)
       .order('name');
 
@@ -110,13 +164,14 @@ export default function OrderScreen() {
       return;
     }
 
-    setCategoryItems((data as MenuItem[]) ?? []);
+    setCategoryItems((data ?? []).map((row) => normalizeMenuItemRow(row)));
     setIsLoadingCategoryItems(false);
   };
 
   const handleSelectItem = (item: MenuItem) => {
     setSelectedItem(item);
-    setSize('12oz');
+    const first = sortedSizes(item)[0] ?? null;
+    setSelectedSizeOz(first);
     setSelectedSupplements([]);
     setStep('customize');
   };
@@ -128,12 +183,12 @@ export default function OrderScreen() {
   };
 
   const handleAddToCart = () => {
-    if (!selectedItem) return;
+    if (!selectedItem || selectedSizeOz == null) return;
 
     const newItem: CartItem = {
       id: `${selectedItem.id}-${Date.now()}`,
       name: selectedItem.name,
-      size,
+      size: selectedSizeOz,
       supplements: selectedSupplements,
       price: Number(currentItemTotal.toFixed(2)),
     };
@@ -302,7 +357,9 @@ export default function OrderScreen() {
             <Pressable style={styles.card} onPress={() => handleSelectItem(item)}>
               <ThemedText type="subtitle">{item.name}</ThemedText>
               <ThemedText style={styles.cardLine}>{item.description}</ThemedText>
-              <ThemedText style={styles.cardPrice}>From ${item.price_small.toFixed(2)}</ThemedText>
+              <ThemedText style={styles.cardPrice}>
+                From ${lowestListedPrice(item).toFixed(2)}
+              </ThemedText>
             </Pressable>
           )}
         />
@@ -310,22 +367,34 @@ export default function OrderScreen() {
     }
 
     if (step === 'customize' && selectedItem) {
+      const sizeOptions = sortedSizes(selectedItem);
+      const canAddSize = sizeOptions.length > 0 && selectedSizeOz != null;
+
       return (
         <ScrollView contentContainerStyle={styles.customizeContent}>
           <View style={styles.section}>
             <ThemedText type="subtitle" style={styles.sectionTitle}>
               Size
             </ThemedText>
-            <View style={styles.row}>
-              {['12oz', '24oz'].map((s) => (
-                <Pressable
-                  key={s}
-                  style={[styles.chip, size === s && styles.chipSelected]}
-                  onPress={() => setSize(s as '12oz' | '24oz')}>
-                  <ThemedText>{s}</ThemedText>
-                </Pressable>
-              ))}
-            </View>
+            {sizeOptions.length === 0 ? (
+              <ThemedText style={styles.cardLine}>No sizes are available for this item.</ThemedText>
+            ) : (
+              <View style={styles.rowWrap}>
+                {sizeOptions.map((oz) => {
+                  const p = priceForOz(selectedItem.prices, oz);
+                  const selected = selectedSizeOz === oz;
+                  return (
+                    <Pressable
+                      key={oz}
+                      style={[styles.sizeChip, selected && styles.chipSelected]}
+                      onPress={() => setSelectedSizeOz(oz)}>
+                      <ThemedText style={styles.sizeChipTitle}>{oz} oz</ThemedText>
+                      <ThemedText style={styles.sizeChipPrice}>${p.toFixed(2)}</ThemedText>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            )}
           </View>
 
           <View style={styles.section}>
@@ -353,7 +422,10 @@ export default function OrderScreen() {
             </ThemedText>
           </View>
 
-          <Pressable style={styles.primaryButton} onPress={handleAddToCart}>
+          <Pressable
+            style={[styles.primaryButton, !canAddSize && styles.primaryButtonDisabled]}
+            onPress={handleAddToCart}
+            disabled={!canAddSize}>
             <ThemedText style={styles.primaryButtonText}>
               Add to cart • ${currentItemTotal.toFixed(2)}
             </ThemedText>
@@ -473,6 +545,22 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: '#F2F4F7',
   },
+  sizeChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: '#F2F4F7',
+    minWidth: 88,
+    alignItems: 'center',
+  },
+  sizeChipTitle: {
+    fontWeight: '600',
+  },
+  sizeChipPrice: {
+    marginTop: 2,
+    fontSize: 13,
+    opacity: 0.85,
+  },
   chipSelected: {
     backgroundColor: '#D9F2E6',
   },
@@ -485,6 +573,9 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  primaryButtonDisabled: {
+    opacity: 0.45,
   },
   primaryButtonText: {
     color: '#FFFFFF',

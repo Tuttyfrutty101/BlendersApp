@@ -29,8 +29,8 @@ create table if not exists public.menu_items (
     category in ('smoothie', 'bowl', 'shot', 'juice', 'focused health blend')
   ),
   description text not null,
-  price_small numeric(10, 2) not null,
-  price_large numeric(10, 2) not null,
+  sizes integer[] not null check (cardinality(sizes) > 0),
+  prices jsonb not null,
   is_featured boolean not null default false,
   is_popular boolean not null default false,
   image_url text
