@@ -1,5 +1,7 @@
 import { Tabs, Redirect } from 'expo-router';
 import React, { useEffect, useState } from 'react';
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
+import { Text } from 'react-native';
 
 import { HapticTab } from '@/components/haptic-tab';
 import { IconSymbol } from '@/components/ui/icon-symbol';
@@ -74,10 +76,16 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="rewards"
+        options={{
+          title: 'Rewards',
+          tabBarIcon: () => <Text style={{ fontSize: 20 }}>🍊</Text>,
+        }}
+      />
+      <Tabs.Screen
         name="account"
         options={{
-          title: 'Account',
-          tabBarIcon: ({ color }) => <IconSymbol size={26} name="person.crop.circle" color={color} />,
+          href: null,
         }}
       />
     </Tabs>

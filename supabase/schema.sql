@@ -6,6 +6,8 @@ create table if not exists public.users (
   name text not null,
   email text not null unique,
   rewards_points integer not null default 0,
+  favorite_store_ids uuid[] not null default '{}'::uuid[],
+  favorite_menu_item_ids uuid[] not null default '{}'::uuid[],
   created_at timestamp with time zone not null default now()
 );
 
@@ -31,12 +33,45 @@ create table if not exists public.menu_items (
   description text not null,
   sizes integer[] not null check (cardinality(sizes) > 0),
   prices jsonb not null,
-  is_featured boolean not null default false,
-  is_popular boolean not null default false,
+  featured boolean not null default false,
   image_url text
 );
 
 create index if not exists idx_menu_items_category on public.menu_items(category);
-create index if not exists idx_menu_items_featured on public.menu_items(is_featured);
-create index if not exists idx_menu_items_popular on public.menu_items(is_popular);
+
+create table if not exists public.supplements (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  price numeric(10, 2) not null,
+  created_at timestamp with time zone not null default now()
+);
+
+create index if not exists idx_supplements_name on public.supplements (name);
+
+create table if not exists public.featured (
+  id uuid primary key default gen_random_uuid(),
+  title text not null,
+  description text,
+  image_url text,
+  menu_item_id uuid not null references public.menu_items(id) on delete cascade,
+  display_order integer not null default 0,
+  created_at timestamp with time zone not null default now()
+);
+
+create index if not exists idx_featured_menu_item_id on public.featured(menu_item_id);
+create index if not exists idx_featured_display_order on public.featured(display_order);
+
+create table if not exists public.stores (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  address text not null,
+  hours_weekday text not null,
+  hours_weekend text not null,
+  phone text,
+  latitude numeric,
+  longitude numeric,
+  created_at timestamp with time zone not null default now()
+);
+
+create index if not exists idx_stores_name on public.stores(name);
 

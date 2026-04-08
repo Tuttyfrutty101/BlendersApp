@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Alert, Pressable, StyleSheet, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import { supabase } from '@/supabase';
 
@@ -73,7 +73,7 @@ export default function AccountScreen() {
   };
 
   return (
-    <ThemedView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
       <View style={styles.profileSection}>
         <View style={styles.avatar}>
           <ThemedText type="subtitle" style={styles.avatarText}>
@@ -99,7 +99,7 @@ export default function AccountScreen() {
           </Pressable>
         ))}
       </View>
-    </ThemedView>
+    </SafeAreaView>
   );
 }
 
@@ -107,7 +107,7 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     paddingHorizontal: 20,
-    paddingTop: 24,
+    paddingTop: 12,
     backgroundColor: '#FFFFFF',
   },
   profileSection: {

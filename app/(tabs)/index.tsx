@@ -1,26 +1,29 @@
+import { LinearGradient } from 'expo-linear-gradient';
 import { useEffect, useState } from 'react';
-import { StyleSheet, View, ScrollView } from 'react-native';
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
+import { Image } from 'expo-image';
+import { useRouter } from 'expo-router';
+import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { Colors } from '@/constants/theme';
-import { useColorScheme } from '@/hooks/use-color-scheme';
 import { supabase } from '@/supabase';
 
 const NEXT_REWARD = 200;
-type MenuItem = {
+
+type FeaturedCard = {
   id: string;
-  name: string;
-  description: string;
+  title: string;
+  description: string | null;
+  image_url: string | null;
 };
 
 export default function HomeScreen() {
-  const colorScheme = useColorScheme() ?? 'light';
-  const palette = Colors[colorScheme];
+  const router = useRouter();
   const [points, setPoints] = useState(0);
   const [displayName, setDisplayName] = useState('there');
-  const [featuredItems, setFeaturedItems] = useState<MenuItem[]>([]);
-  const [popularItems, setPopularItems] = useState<MenuItem[]>([]);
+  const [featuredCards, setFeaturedCards] = useState<FeaturedCard[]>([]);
 
   useEffect(() => {
     const loadRewardsPoints = async () => {
@@ -62,35 +65,22 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => {
-    const loadMenuSections = async () => {
-      const [{ data: featured, error: featuredError }, { data: popular, error: popularError }] =
-        await Promise.all([
-          supabase
-            .from('menu_items')
-            .select('id, name, description')
-            .eq('is_featured', true)
-            .order('name'),
-          supabase
-            .from('menu_items')
-            .select('id, name, description')
-            .eq('is_popular', true)
-            .order('name'),
-        ]);
+    const loadFeaturedCards = async () => {
+      const { data, error } = await supabase
+        .from('featured')
+        .select('id, title, description, image_url')
+        .order('display_order', { ascending: true });
 
-      if (featuredError) {
-        console.error('Failed to load featured items:', featuredError);
-      } else {
-        setFeaturedItems(featured ?? []);
+      if (error) {
+        console.error('Failed to load featured cards:', error);
+        setFeaturedCards([]);
+        return;
       }
 
-      if (popularError) {
-        console.error('Failed to load popular items:', popularError);
-      } else {
-        setPopularItems(popular ?? []);
-      }
+      setFeaturedCards((data as FeaturedCard[]) ?? []);
     };
 
-    loadMenuSections();
+    loadFeaturedCards();
   }, []);
 
   const progress = points / NEXT_REWARD;
@@ -98,106 +88,67 @@ export default function HomeScreen() {
 
   return (
     <ThemedView style={styles.screen}>
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Welcome */}
-        <ThemedText type="title" style={styles.welcomeText}>
-          Hey {displayName} 👋
-        </ThemedText>
-        <ThemedText type="default" style={styles.subtitle}>
-          Ready for a fresh Blenders run?
-        </ThemedText>
-
-        {/* Rewards card */}
-        <View style={[styles.rewardsCard, { backgroundColor: palette.tint }]}>
-          <ThemedText type="subtitle" style={styles.rewardsLabel}>
-            Rewards
-          </ThemedText>
-          <ThemedText type="title" style={styles.pointsText}>
-            {points} points
-          </ThemedText>
-          <ThemedText type="default" style={styles.rewardSubtext}>
-            {pointsToNextReward} points until your next reward at {NEXT_REWARD}.
-          </ThemedText>
-
-          <View style={styles.progressTrack}>
-            <View
-              style={[
-                styles.progressFill,
-                {
-                  width: `${Math.min(progress, 1) * 100}%`,
-                  backgroundColor: '#FF8A00',
-                },
-              ]}
-            />
+      <SafeAreaView style={styles.safeArea} edges={['top']}>
+        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+          <View style={styles.topRow}>
+            <Pressable style={styles.storesButton} onPress={() => router.push('/order')}>
+              <MaterialIcons name="location-on" size={18} color="#5A6B5F" />
+              <ThemedText style={styles.storesButtonText}>Stores</ThemedText>
+            </Pressable>
+            <View style={styles.headerActions}>
+              <Pressable style={styles.iconButton}>
+                <MaterialIcons name="receipt-long" size={20} color="#5A6B5F" />
+              </Pressable>
+              <Pressable style={styles.iconButton} onPress={() => router.push('/account')}>
+                <MaterialIcons name="account-circle" size={22} color="#5A6B5F" />
+              </Pressable>
+            </View>
           </View>
-        </View>
 
-        {/* Featured */}
-        <Section title="Featured">
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.horizontalList}>
-            {featuredItems.map((smoothie) => (
-              <SmoothieCard
-                key={smoothie.id}
-                name={smoothie.name}
-                ingredients={smoothie.description}
-              />
-            ))}
-          </ScrollView>
-        </Section>
+          <ThemedText type="title" style={styles.welcomeText}>
+            Start the day with your favorite, {displayName}
+          </ThemedText>
 
-        {/* Popular */}
-        <Section title="Popular">
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.horizontalList}>
-            {popularItems.map((smoothie) => (
-              <SmoothieCard
-                key={smoothie.id}
-                name={smoothie.name}
-                ingredients={smoothie.description}
-              />
-            ))}
-          </ScrollView>
-        </Section>
-      </ScrollView>
-    </ThemedView>
-  );
-}
+          <Pressable onPress={() => router.push('/rewards')}>
+            <LinearGradient
+              colors={['#006C45', '#0A8B57', '#13A25F']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.rewardsCard}>
+              <View style={styles.rewardsTopRow}>
+                <ThemedText style={styles.rewardsLabel}>Reward balance</ThemedText>
+                <ThemedText style={styles.rewardsStatus}>GREEN STATUS</ThemedText>
+              </View>
+              <View style={styles.pointsRow}>
+                <ThemedText style={styles.pointsValue}>{points}</ThemedText>
+                <ThemedText style={styles.pointsOrange}>🍊</ThemedText>
+              </View>
+              <ThemedText style={styles.rewardSubtext}>
+                {pointsToNextReward} points until your next reward at {NEXT_REWARD}.
+              </ThemedText>
+              <View style={styles.progressTrack}>
+                <View style={[styles.progressFill, { width: `${Math.min(progress, 1) * 100}%` }]} />
+              </View>
+            </LinearGradient>
+          </Pressable>
 
-type SectionProps = {
-  title: string;
-  children: React.ReactNode;
-};
-
-function Section({ title, children }: SectionProps) {
-  return (
-    <View style={styles.section}>
-      <ThemedText type="subtitle" style={styles.sectionTitle}>
-        {title}
-      </ThemedText>
-      {children}
-    </View>
-  );
-}
-
-type SmoothieCardProps = {
-  name: string;
-  ingredients: string;
-};
-
-function SmoothieCard({ name, ingredients }: SmoothieCardProps) {
-  return (
-    <ThemedView style={styles.smoothieCard}>
-      <ThemedText type="subtitle" style={styles.smoothieName}>
-        {name}
-      </ThemedText>
-      <ThemedText type="default" style={styles.smoothieIngredients}>
-        {ingredients}
-      </ThemedText>
+          {featuredCards.map((card) => (
+            <View key={card.id} style={styles.heroCard}>
+              {card.image_url ? (
+                <Image source={{ uri: card.image_url }} style={styles.heroImage} contentFit="cover" />
+              ) : (
+                <View style={styles.heroImage} />
+              )}
+              <View style={styles.heroBody}>
+                <ThemedText style={styles.heroTitle}>{card.title}</ThemedText>
+                {card.description ? (
+                  <ThemedText style={styles.heroCopy}>{card.description}</ThemedText>
+                ) : null}
+              </View>
+            </View>
+          ))}
+        </ScrollView>
+      </SafeAreaView>
     </ThemedView>
   );
 }
@@ -205,70 +156,150 @@ function SmoothieCard({ name, ingredients }: SmoothieCardProps) {
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
+    backgroundColor: '#F8FAF8',
+  },
+  safeArea: {
+    flex: 1,
   },
   content: {
-    paddingHorizontal: 20,
-    paddingTop: 24,
-    paddingBottom: 32,
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 36,
+  },
+  topRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  storesButton: {
+    height: 38,
+    borderRadius: 19,
+    paddingHorizontal: 12,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E5ECE6',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  storesButtonText: {
+    color: '#30473A',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  iconButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E5ECE6',
   },
   welcomeText: {
-    marginBottom: 4,
-  },
-  subtitle: {
-    marginBottom: 20,
+    fontSize: 38,
+    lineHeight: 42,
+    fontWeight: '800',
+    color: '#0A1711',
+    marginBottom: 14,
   },
   rewardsCard: {
-    borderRadius: 16,
+    borderRadius: 18,
     padding: 16,
-    marginBottom: 24,
+    marginBottom: 14,
+    shadowColor: '#06543A',
+    shadowOpacity: 0.22,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 6,
+  },
+  rewardsTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   rewardsLabel: {
-    color: '#FFFFFF',
-    marginBottom: 4,
+    color: '#E8FFF1',
+    fontSize: 13,
+    fontWeight: '600',
+    letterSpacing: 0.1,
   },
-  pointsText: {
+  rewardsStatus: {
     color: '#FFFFFF',
-    marginBottom: 4,
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+  },
+  pointsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 2,
+    marginBottom: 6,
+  },
+  pointsValue: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 42,
+    lineHeight: 48,
+  },
+  pointsOrange: {
+    fontSize: 28,
+    marginLeft: 4,
+    marginTop: -2,
   },
   rewardSubtext: {
-    color: '#F1FFF8',
+    color: '#D9FEE6',
+    fontSize: 13,
     marginBottom: 12,
   },
   progressTrack: {
-    height: 8,
+    height: 7,
     borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.25)',
+    backgroundColor: 'rgba(255,255,255,0.28)',
     overflow: 'hidden',
   },
   progressFill: {
     height: '100%',
     borderRadius: 999,
+    backgroundColor: '#FF9D2E',
   },
-  section: {
-    marginBottom: 24,
-  },
-  sectionTitle: {
-    marginBottom: 12,
-  },
-  horizontalList: {
-    paddingRight: 8,
-  },
-  smoothieCard: {
-    width: 200,
-    padding: 14,
-    borderRadius: 14,
+  heroCard: {
+    borderRadius: 18,
+    overflow: 'hidden',
     backgroundColor: '#FFFFFF',
-    marginRight: 12,
-    shadowColor: '#000',
+    borderWidth: 1,
+    borderColor: '#E8EEE9',
+    marginBottom: 20,
+    shadowColor: '#163126',
     shadowOpacity: 0.08,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 3,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 4,
   },
-  smoothieName: {
+  heroImage: {
+    height: 165,
+    backgroundColor: '#FFB562',
+  },
+  heroBody: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  heroTitle: {
+    fontSize: 33,
+    lineHeight: 37,
+    fontWeight: '800',
+    color: '#141414',
     marginBottom: 4,
   },
-  smoothieIngredients: {
-    fontSize: 13,
+  heroCopy: {
+    fontSize: 15,
+    lineHeight: 21,
+    color: '#4A534F',
   },
 });
