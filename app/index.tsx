@@ -32,7 +32,7 @@ export default function Index() {
   }
 
   if (!isAuthenticated) {
-    return <Redirect href="/login" />;
+    return <Redirect href="/signup" />;
   }
 
   return <Redirect href="/(tabs)" />;

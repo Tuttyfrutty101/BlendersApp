@@ -28,9 +28,25 @@ import {
 } from '@/components/auth/authTheme';
 import { supabase } from '@/supabase';
 
-export default function LoginScreen() {
+function errorMessage(err: unknown): string {
+  if (err instanceof Error && err.message) {
+    return err.message;
+  }
+  if (typeof err === 'object' && err !== null && 'message' in err) {
+    const m = (err as { message?: unknown }).message;
+    if (typeof m === 'string' && m.length > 0) {
+      return m;
+    }
+  }
+  return 'Something went wrong. Please try again.';
+}
+
+export default function SignUpScreen() {
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [birthday, setBirthday] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -46,47 +62,80 @@ export default function LoginScreen() {
     void checkSession();
   }, []);
 
-  const handleSignIn = async () => {
-    const em = email.trim();
-    if (!em || !password) {
-      Alert.alert('Missing info', 'Please enter your email and password.');
-      return;
-    }
-
-    setIsLoading(true);
-    try {
-      const { error } = await supabase.auth.signInWithPassword({
-        email: em,
-        password,
-      });
-      if (error) {
-        throw error;
-      }
-      router.replace('/(tabs)');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Sign in failed.';
-      Alert.alert('Sign in error', message);
-    } finally {
-      setIsLoading(false);
+  const upsertProfile = async (userId: string, userEmail: string, displayName: string) => {
+    const { error: profileInsertError } = await supabase.from('users').upsert(
+      {
+        id: userId,
+        name: displayName,
+        email: userEmail,
+      },
+      { onConflict: 'id' },
+    );
+    if (profileInsertError) {
+      throw profileInsertError;
     }
   };
 
-  const handleForgotPassword = async () => {
+  const finishAndGoHome = async (userId: string, userEmail: string, displayName: string) => {
+    await upsertProfile(userId, userEmail, displayName);
+    router.replace('/(tabs)');
+  };
+
+  const handleCreateAccount = async () => {
+    const fn = firstName.trim();
+    const ln = lastName.trim();
     const em = email.trim();
-    if (!em) {
-      Alert.alert('Email required', 'Enter your email address above, then tap Forgot password again.');
+    if (!fn || !ln || !em || !password) {
+      Alert.alert('Missing info', 'Please enter your first name, last name, email, and password.');
       return;
     }
+
     setIsLoading(true);
     try {
-      const { error } = await supabase.auth.resetPasswordForEmail(em);
+      const displayName = `${fn} ${ln}`.trim();
+      const { data, error } = await supabase.auth.signUp({
+        email: em,
+        password,
+        options: {
+          data: {
+            name: displayName,
+            birthday: birthday.trim() || undefined,
+          },
+        },
+      });
+
       if (error) {
         throw error;
       }
-      Alert.alert('Check your inbox', 'If an account exists for that email, we sent a reset link.');
+
+      if (data.session && data.user?.id && data.user.email) {
+        await finishAndGoHome(data.user.id, data.user.email, displayName);
+        return;
+      }
+
+      const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+        email: em,
+        password,
+      });
+
+      if (signInError) {
+        Alert.alert(
+          'Check your email',
+          'We created your account. Confirm your email if required, then sign in from the login screen.',
+        );
+        return;
+      }
+
+      if (signInData.session?.user?.id && signInData.user.email) {
+        const metaName =
+          typeof signInData.user.user_metadata?.name === 'string' &&
+          signInData.user.user_metadata.name.trim()
+            ? signInData.user.user_metadata.name.trim()
+            : displayName;
+        await finishAndGoHome(signInData.user.id, signInData.user.email, metaName);
+      }
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Could not send reset email.';
-      Alert.alert('Error', message);
+      Alert.alert('Sign up error', errorMessage(err));
     } finally {
       setIsLoading(false);
     }
@@ -110,13 +159,38 @@ export default function LoginScreen() {
                   🍊
                 </Text>
               </View>
-              <Text style={styles.heroTitle}>Welcome back</Text>
-              <Text style={styles.heroSubtitle}>Sign in to your Blenders account</Text>
+              <Text style={styles.heroTitle}>Join Blenders</Text>
+              <Text style={styles.heroSubtitle}>Create your account and start earning rewards</Text>
             </SafeAreaView>
           </AuthHeaderBackground>
 
           <View style={styles.sheet}>
             <View style={styles.card}>
+              <View style={styles.nameRow}>
+                <View style={styles.nameCol}>
+                  <Text style={styles.label}>First name</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="First name"
+                    placeholderTextColor={AUTH_LABEL}
+                    value={firstName}
+                    onChangeText={setFirstName}
+                    autoCapitalize="words"
+                  />
+                </View>
+                <View style={styles.nameCol}>
+                  <Text style={styles.label}>Last name</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="Last name"
+                    placeholderTextColor={AUTH_LABEL}
+                    value={lastName}
+                    onChangeText={setLastName}
+                    autoCapitalize="words"
+                  />
+                </View>
+              </View>
+
               <Text style={styles.label}>Email</Text>
               <View style={styles.inputRow}>
                 <MaterialIcons name="email" size={20} color={AUTH_LABEL} style={styles.inputIcon} />
@@ -152,24 +226,33 @@ export default function LoginScreen() {
                 </Pressable>
               </View>
 
-              <Pressable style={styles.forgotWrap} onPress={() => void handleForgotPassword()}>
-                <Text style={styles.forgotText}>Forgot password?</Text>
-              </Pressable>
+              <Text style={styles.label}>Birthday</Text>
+              <View style={styles.inputRow}>
+                <MaterialIcons name="calendar-today" size={20} color={AUTH_LABEL} style={styles.inputIcon} />
+                <TextInput
+                  style={styles.inputFlex}
+                  placeholder="MM / DD / YYYY"
+                  placeholderTextColor={AUTH_LABEL}
+                  value={birthday}
+                  onChangeText={setBirthday}
+                />
+              </View>
+              <Text style={styles.helper}>We&apos;ll send you a free smoothie on your birthday</Text>
 
               <Pressable
                 style={[styles.primaryBtn, isLoading && styles.primaryBtnDisabled]}
-                onPress={() => void handleSignIn()}
+                onPress={() => void handleCreateAccount()}
                 disabled={isLoading}>
                 {isLoading ? (
                   <ActivityIndicator color="#FFFFFF" />
                 ) : (
-                  <Text style={styles.primaryBtnText}>Sign in</Text>
+                  <Text style={styles.primaryBtnText}>Create account</Text>
                 )}
               </Pressable>
 
               <View style={styles.dividerRow}>
                 <View style={styles.dividerLine} />
-                <Text style={styles.dividerText}>or continue with</Text>
+                <Text style={styles.dividerText}>or sign up with</Text>
                 <View style={styles.dividerLine} />
               </View>
 
@@ -188,9 +271,9 @@ export default function LoginScreen() {
                 </Pressable>
               </View>
 
-              <Pressable style={styles.footerLink} onPress={() => router.replace('/signup')}>
+              <Pressable style={styles.footerLink} onPress={() => router.replace('/login')}>
                 <Text style={styles.footerMuted}>
-                  Don&apos;t have an account? <Text style={styles.footerAccent}>Sign up</Text>
+                  Already have an account? <Text style={styles.footerAccent}>Sign in</Text>
                 </Text>
               </Pressable>
             </View>
@@ -215,7 +298,7 @@ const styles = StyleSheet.create({
   headerSafe: {
     paddingHorizontal: 8,
     paddingTop: 20,
-    paddingBottom: 24,
+    paddingBottom: 20,
     alignItems: 'center',
   },
   logoRing: {
@@ -231,7 +314,7 @@ const styles = StyleSheet.create({
     fontSize: 30,
   },
   heroTitle: {
-    fontSize: 28,
+    fontSize: 26,
     fontWeight: '800',
     color: '#FFFFFF',
     textAlign: 'center',
@@ -242,7 +325,7 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     color: AUTH_MUTED_HEADER,
     textAlign: 'center',
-    paddingHorizontal: 32,
+    paddingHorizontal: 28,
     lineHeight: 22,
   },
   sheet: {
@@ -260,15 +343,34 @@ const styles = StyleSheet.create({
   },
   card: {
     paddingHorizontal: 22,
-    paddingTop: 22,
+    paddingTop: 20,
     paddingBottom: 36,
+  },
+  nameRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 4,
+  },
+  nameCol: {
+    flex: 1,
   },
   label: {
     fontSize: 13,
     fontWeight: '600',
     color: AUTH_LABEL,
+    textAlign: 'center',
     marginBottom: 8,
-    marginTop: 4,
+    marginTop: 12,
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: AUTH_BORDER,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: Platform.OS === 'ios' ? 14 : 10,
+    fontSize: 16,
+    backgroundColor: AUTH_INPUT_BG,
+    color: '#111827',
   },
   inputRow: {
     flexDirection: 'row',
@@ -278,7 +380,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingHorizontal: 12,
     backgroundColor: AUTH_INPUT_BG,
-    marginBottom: 4,
+    marginTop: 4,
   },
   inputIcon: {
     marginRight: 8,
@@ -292,22 +394,19 @@ const styles = StyleSheet.create({
   eyeBtn: {
     padding: 4,
   },
-  forgotWrap: {
-    alignSelf: 'flex-end',
+  helper: {
+    fontSize: 12,
+    color: AUTH_LABEL,
+    textAlign: 'center',
     marginTop: 8,
-    marginBottom: 18,
-    paddingVertical: 4,
-  },
-  forgotText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: AUTH_ACCENT,
+    marginBottom: 8,
   },
   primaryBtn: {
     backgroundColor: AUTH_GREEN,
     borderRadius: 999,
     paddingVertical: 16,
     alignItems: 'center',
+    marginTop: 16,
   },
   primaryBtnDisabled: {
     opacity: 0.85,

@@ -2,6 +2,7 @@ import FontAwesome5 from '@expo/vector-icons/FontAwesome5';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useFocusEffect } from '@react-navigation/native';
 import {
   Fragment,
   useCallback,
@@ -16,11 +17,13 @@ import {
   Animated,
   Easing,
   FlatList,
+  Linking,
   Modal,
   Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
+  Share,
   StyleSheet,
   Switch,
   Text,
@@ -33,6 +36,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
+import {
+  clearCustomizeMenuItemFromHome,
+  peekCustomizeMenuItemFromHome,
+} from '@/lib/pendingCustomizeFromHome';
+import { consumePendingReorder } from '@/lib/pendingReorder';
+import type { CartItem } from '@/types/cart';
 import { supabase } from '@/supabase';
 
 /** Hero image for the “Build your juice” customize flow (from Supabase Storage). */
@@ -51,6 +60,8 @@ const CHECKOUT_LINE_EDIT_ACTIONS_WIDTH = 88;
 /** Lighter Blenders green (matches brand gradient mid-tone) for checkout CTAs. */
 const CHECKOUT_LIGHT_GREEN = '#0A8B57';
 const PLACE_ORDER_GREEN = CHECKOUT_LIGHT_GREEN;
+/** Same orange as the selected map pin ring and pointer (#FF8A00). */
+const STORE_PIN_ORANGE = '#FF8A00';
 
 function cubicBezier1D(t: number, a: number, b: number, c: number, d: number): number {
   const u = 1 - t;
@@ -72,6 +83,7 @@ type Location = {
   id: string;
   name: string;
   address: string;
+  phone: string | null;
   /** Postgres `time`, e.g. `07:00:00`. */
   open_weekday: string;
   close_weekday: string;
@@ -98,24 +110,6 @@ type MenuItem = {
   alterations: Alteration[];
 };
 
-type CartItem = {
-  id: string;
-  name: string;
-  /** Fluid ounces for this line item. */
-  size: number;
-  supplements: string[];
-  alterations: string[];
-  specialInstructions?: string;
-  price: number;
-  /** Source menu item — used when reopening customize from checkout. */
-  menuItemId?: string;
-  juiceBuildFromMenuCard?: boolean;
-  supplementSelections?: Record<string, number>;
-  supplementSelectionOrder?: string[];
-  alterationIds?: string[];
-  juiceIngredientIds?: string[];
-};
-
 function getCartFlyImageUri(item: MenuItem, isJuiceBuildFromCard: boolean): string | null {
   if (isJuiceBuildFromCard || item.category === 'juice') {
     return JUICE_BUILD_MODAL_IMAGE_URL;
@@ -126,6 +120,10 @@ function getCartFlyImageUri(item: MenuItem, isJuiceBuildFromCard: boolean): stri
 function checkoutImageUriForCartLine(item: CartItem, menuItems: MenuItem[]): string | null {
   if (item.juiceBuildFromMenuCard || item.name.startsWith('Juice (')) {
     return JUICE_BUILD_MODAL_IMAGE_URL;
+  }
+  const persisted = item.imageUrl?.trim();
+  if (persisted) {
+    return persisted;
   }
   if (item.menuItemId) {
     const m = menuItems.find((x) => x.id === item.menuItemId);
@@ -371,10 +369,44 @@ function getStoreStatusLine(
   return { text: `Closed · Opens at ${formatTimeForDisplay(nextOpen)}`, tone: 'closed' };
 }
 
+/** City line for store detail — uses the segment before state/ZIP when possible. */
+function cityFromAddress(address: string): string {
+  const parts = address
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (parts.length >= 3) {
+    return parts[parts.length - 2] ?? '';
+  }
+  if (parts.length === 2) {
+    return parts[0] ?? '';
+  }
+  return parts[0] ?? '';
+}
+
+function formatPhoneDisplay(phone: string | null | undefined): string | null {
+  if (phone == null || !phone.trim()) return null;
+  const d = phone.replace(/\D/g, '');
+  if (d.length === 10) {
+    return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+  }
+  return phone.trim();
+}
+
+function storeHoursSummaryLines(location: Location): { weekday: string; weekend: string } {
+  const wd = `${formatTimeForDisplay(location.open_weekday)} – ${formatTimeForDisplay(location.close_weekday)}`;
+  const we = `${formatTimeForDisplay(location.open_weekend)} – ${formatTimeForDisplay(location.close_weekend)}`;
+  return {
+    weekday: `Monday – Friday: ${wd}`,
+    weekend: `Saturday – Sunday: ${we}`,
+  };
+}
+
 function normalizeStoreRow(row: {
   id: string;
   name: string;
   address: string;
+  phone?: string | null;
   open_weekday: string;
   close_weekday: string;
   open_weekend: string;
@@ -406,6 +438,7 @@ function normalizeStoreRow(row: {
     id: row.id,
     name: row.name,
     address: row.address,
+    phone: typeof row.phone === 'string' && row.phone.trim().length > 0 ? row.phone.trim() : null,
     open_weekday: row.open_weekday,
     close_weekday: row.close_weekday,
     open_weekend: row.open_weekend,
@@ -465,6 +498,7 @@ type StoreLocationRowProps = {
   onSelectRow: () => void;
   onOrderHere: () => void;
   onToggleFavorite: (id: string) => void;
+  onOpenInfo: () => void;
 };
 
 function StoreLocationRow({
@@ -475,6 +509,7 @@ function StoreLocationRow({
   onSelectRow,
   onOrderHere,
   onToggleFavorite,
+  onOpenInfo,
 }: StoreLocationRowProps) {
   const orderSlide = useRef(new Animated.Value(0)).current;
 
@@ -495,11 +530,11 @@ function StoreLocationRow({
   const statusLine = getStoreStatusLine(item, now);
 
   return (
-    <Pressable
-      style={[styles.storeRow, isSelected && styles.storeRowSelected]}
-      onPress={onSelectRow}>
+    <View style={[styles.storeRow, isSelected && styles.storeRowSelected]}>
       <View style={styles.storeRowTop}>
-        <ThemedText style={styles.storeTitle}>{item.name}</ThemedText>
+        <Pressable style={styles.storeTitlePress} onPress={onSelectRow}>
+          <ThemedText style={styles.storeTitle}>{item.name}</ThemedText>
+        </Pressable>
         <View style={styles.storeIcons}>
           <Pressable
             style={styles.storeIconButton}
@@ -507,37 +542,39 @@ function StoreLocationRow({
             <MaterialIcons
               name={favoriteStoreIds.includes(item.id) ? 'favorite' : 'favorite-border'}
               size={22}
-              color={favoriteStoreIds.includes(item.id) ? '#FF8A00' : '#58635D'}
+              color={favoriteStoreIds.includes(item.id) ? STORE_PIN_ORANGE : '#58635D'}
             />
           </Pressable>
-          <Pressable style={styles.storeIconButton}>
+          <Pressable style={styles.storeIconButton} onPress={onOpenInfo}>
             <MaterialIcons name="info-outline" size={22} color="#58635D" />
           </Pressable>
         </View>
       </View>
       <View style={styles.storeRowMiddle}>
-        <View style={styles.storeRowTextBlock}>
-          <ThemedText
-            style={styles.storeAddress}
-            numberOfLines={1}
-            ellipsizeMode="tail">
-            {item.address}
-          </ThemedText>
-          <View style={styles.storeMetaRow}>
-            <View
-              style={[
-                styles.storeStatusDot,
-                statusLine.tone === 'open' ? styles.storeStatusDotOpen : styles.storeStatusDotClosed,
-              ]}
-            />
+        <Pressable style={styles.storeRowTextPress} onPress={onSelectRow}>
+          <View style={styles.storeRowTextBlock}>
             <ThemedText
-              style={[styles.storeMeta, statusLine.tone === 'open' ? styles.storeMetaOpen : styles.storeMetaClosed]}
+              style={styles.storeAddress}
               numberOfLines={1}
               ellipsizeMode="tail">
-              {statusLine.text}
+              {item.address}
             </ThemedText>
+            <View style={styles.storeMetaRow}>
+              <View
+                style={[
+                  styles.storeStatusDot,
+                  statusLine.tone === 'open' ? styles.storeStatusDotOpen : styles.storeStatusDotClosed,
+                ]}
+              />
+              <ThemedText
+                style={[styles.storeMeta, statusLine.tone === 'open' ? styles.storeMetaOpen : styles.storeMetaClosed]}
+                numberOfLines={1}
+                ellipsizeMode="tail">
+                {statusLine.text}
+              </ThemedText>
+            </View>
           </View>
-        </View>
+        </Pressable>
         <View style={styles.storeOrderButtonOverlap} pointerEvents="box-none">
           <Animated.View
             style={[styles.storeOrderButtonSlideWrap, { transform: [{ translateX: orderTranslateX }] }]}>
@@ -563,7 +600,7 @@ function StoreLocationRow({
           </Animated.View>
         </View>
       </View>
-    </Pressable>
+    </View>
   );
 }
 
@@ -586,6 +623,7 @@ export default function OrderScreen() {
   const [categoryListTab, setCategoryListTab] = useState<'menu' | 'favorites'>('menu');
   const [storeListTab, setStoreListTab] = useState<'nearby' | 'favorites'>('nearby');
   const [storeSearch, setStoreSearch] = useState('');
+  const [storeInfoLocation, setStoreInfoLocation] = useState<Location | null>(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const searchAnim = useRef(new Animated.Value(0)).current;
   const [menuSearch, setMenuSearch] = useState('');
@@ -617,6 +655,8 @@ export default function OrderScreen() {
   const itemSlideX = useRef(new Animated.Value(0)).current;
   /** Customize bottom sheet: translateY (off-screen = windowHeight → visible = 0). */
   const customizeSheetTranslateY = useRef(new Animated.Value(0)).current;
+  /** Store info sheet: same slide-up / slide-down motion. */
+  const storeInfoSheetTranslateY = useRef(new Animated.Value(0)).current;
   /** Sliding indicator for selected size segment. */
   const sizeSelectorTranslateX = useRef(new Animated.Value(0)).current;
   /** Supplements full-cover sheet slides from bottom. */
@@ -651,8 +691,71 @@ export default function OrderScreen() {
   const editCartItemIdRef = useRef<string | null>(null);
   const returnToCheckoutAfterCustomizeRef = useRef(false);
   const savedStepBeforeCheckoutEditRef = useRef<Step>('category');
+  const customizeFromHomeProcessingRef = useRef(false);
 
   const slideDuration = 300;
+
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      void (async () => {
+        const bundle = consumePendingReorder();
+        if (!bundle || bundle.items.length === 0) return;
+
+        let loc: Location | null = null;
+        if (bundle.storeId) {
+          const { data, error } = await supabase
+            .from('stores')
+            .select(
+              'id, name, address, phone, open_weekday, close_weekday, open_weekend, close_weekend, latitude, longitude',
+            )
+            .eq('id', bundle.storeId)
+            .maybeSingle();
+          if (cancelled) return;
+          if (error || !data) {
+            console.error('Reorder: could not load store for checkout', error);
+          } else {
+            loc = normalizeStoreRow(data);
+          }
+        }
+
+        if (cancelled) return;
+
+        setCart((prev) => [...prev, ...bundle.items]);
+
+        if (bundle.storeId && !loc) {
+          Alert.alert(
+            'Store unavailable',
+            'We added your items to the cart. Choose a location on the map to check out.',
+          );
+          return;
+        }
+
+        if (loc) {
+          setLocations((prev) => (prev.some((l) => l.id === loc.id) ? prev : [...prev, loc]));
+          setSelectedLocation(loc);
+          await loadMenuCategorySections();
+          if (cancelled) return;
+          setStep('category');
+          setCheckoutEditMode(false);
+          checkoutLineEditAnim.setValue(0);
+          setCheckoutOpen(true);
+          checkoutSlideX.setValue(windowWidth);
+          requestAnimationFrame(() => {
+            Animated.timing(checkoutSlideX, {
+              toValue: 0,
+              duration: 320,
+              easing: Easing.out(Easing.cubic),
+              useNativeDriver: true,
+            }).start();
+          });
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }, [checkoutLineEditAnim, checkoutSlideX, windowWidth]),
+  );
 
   const dismissCustomizeModal = (onClosed?: () => void) => {
     Animated.timing(customizeSheetTranslateY, {
@@ -1002,7 +1105,7 @@ export default function OrderScreen() {
       const { data, error } = await supabase
         .from('stores')
         .select(
-          'id, name, address, open_weekday, close_weekday, open_weekend, close_weekend, latitude, longitude',
+          'id, name, address, phone, open_weekday, close_weekday, open_weekend, close_weekend, latitude, longitude',
         )
         .order('name');
 
@@ -1109,6 +1212,38 @@ export default function OrderScreen() {
     return () => cancelAnimationFrame(id);
   }, [step, windowHeight, customizeSheetTranslateY]);
 
+  useLayoutEffect(() => {
+    if (!storeInfoLocation) {
+      return;
+    }
+    storeInfoSheetTranslateY.setValue(windowHeight);
+    const id = requestAnimationFrame(() => {
+      Animated.timing(storeInfoSheetTranslateY, {
+        toValue: 0,
+        duration: 310,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start();
+    });
+    return () => cancelAnimationFrame(id);
+  }, [storeInfoLocation, windowHeight, storeInfoSheetTranslateY]);
+
+  const dismissStoreInfoModal = useCallback(
+    (afterClose?: () => void) => {
+      Animated.timing(storeInfoSheetTranslateY, {
+        toValue: windowHeight,
+        duration: 280,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }).start(({ finished }) => {
+        if (!finished) return;
+        setStoreInfoLocation(null);
+        afterClose?.();
+      });
+    },
+    [storeInfoSheetTranslateY, windowHeight],
+  );
+
   const toggleFavoriteStore = async (storeId: string) => {
     if (!userId) return;
 
@@ -1193,14 +1328,17 @@ export default function OrderScreen() {
     }).start();
   };
 
-  const handleOrderHere = async () => {
-    if (!selectedLocation) return;
-    await loadMenuCategorySections();
+  const handleOrderHere = async (locationOverride?: Location) => {
+    const loc = locationOverride ?? selectedLocation;
+    if (!loc) return;
+    setSelectedLocation(loc);
+    const items = await loadMenuCategorySections();
     setStep('category');
     animateCategoryInFromTop();
+    await processPendingCustomizeFromHome(loc, items, { skipCategoryAnimation: true });
   };
 
-  const loadMenuCategorySections = async () => {
+  const loadMenuCategorySections = async (): Promise<MenuItem[]> => {
     setIsLoadingMenuCategories(true);
     const { data, error } = await supabase
       .from('menu_items')
@@ -1211,11 +1349,13 @@ export default function OrderScreen() {
       console.error('Failed to load menu categories:', error);
       setMenuItemsByCategory([]);
       setIsLoadingMenuCategories(false);
-      return;
+      return [];
     }
 
-    setMenuItemsByCategory((data ?? []).map((row) => normalizeMenuItemRow(row)));
+    const mapped = (data ?? []).map((row) => normalizeMenuItemRow(row));
+    setMenuItemsByCategory(mapped);
     setIsLoadingMenuCategories(false);
+    return mapped;
   };
 
   const handleSelectLocationFromMap = (location: Location) => {
@@ -1295,7 +1435,7 @@ export default function OrderScreen() {
     });
   };
 
-  const handleSelectItem = (item: MenuItem) => {
+  const handleSelectItem = (item: MenuItem, fromCategoryMenuOverride?: boolean) => {
     setJuiceBuildFromMenuCard(false);
     setSelectedItem(item);
     const sizes = sortedSizes(item);
@@ -1306,7 +1446,13 @@ export default function OrderScreen() {
     setIsSupplementsModalOpen(false);
     setIsAlterationsModalOpen(false);
     setSelectedAlterationIds([]);
-    if (step === 'category') {
+    const fromCategoryMenu =
+      fromCategoryMenuOverride === true
+        ? true
+        : fromCategoryMenuOverride === false
+          ? false
+          : step === 'category';
+    if (fromCategoryMenu) {
       openedCustomizeFromCategoryOnlyRef.current = true;
       itemSlideX.setValue(windowWidth);
     } else {
@@ -1314,6 +1460,65 @@ export default function OrderScreen() {
     }
     setStep('customize');
   };
+
+  const processPendingCustomizeFromHome = async (
+    locationHint: Location | null,
+    preloadedItems: MenuItem[] | null,
+    options?: { skipCategoryAnimation?: boolean },
+  ) => {
+    const pendingId = peekCustomizeMenuItemFromHome();
+    if (!pendingId) return;
+    if (!locationHint) return;
+    if (customizeFromHomeProcessingRef.current) return;
+
+    customizeFromHomeProcessingRef.current = true;
+    try {
+      let items: MenuItem[] =
+        preloadedItems && preloadedItems.length > 0 ? preloadedItems : menuItemsByCategory;
+      if (items.length === 0) {
+        items = await loadMenuCategorySections();
+      }
+      const menuItem = items.find((m) => m.id === pendingId);
+      if (!menuItem) {
+        Alert.alert('Unavailable', 'That menu item is no longer available.');
+        clearCustomizeMenuItemFromHome();
+        customizeFromHomeProcessingRef.current = false;
+        return;
+      }
+
+      clearCustomizeMenuItemFromHome();
+
+      setCategoryListTab('menu');
+      setSelectedSmoothieSubcategory('all');
+      setSelectedCategory(menuItem.category);
+      setCategoryItems(
+        items
+          .filter((i) => i.category === menuItem.category)
+          .slice()
+          .sort((a, b) => a.name.localeCompare(b.name)),
+      );
+      setJuiceBuildFromMenuCard(false);
+      setSelectedJuiceIngredientIds([]);
+
+      if (!options?.skipCategoryAnimation) {
+        setStep('category');
+        animateCategoryInFromTop();
+      }
+
+      requestAnimationFrame(() => {
+        handleSelectItem(menuItem, true);
+        customizeFromHomeProcessingRef.current = false;
+      });
+    } catch {
+      customizeFromHomeProcessingRef.current = false;
+    }
+  };
+
+  useFocusEffect(
+    useCallback(() => {
+      void processPendingCustomizeFromHome(selectedLocation, null);
+    }, [selectedLocation]),
+  );
 
   const openSupplementsModal = () => {
     setIsAlterationsModalOpen(false);
@@ -1648,6 +1853,8 @@ export default function OrderScreen() {
         alterations: item.alterations,
         special_instructions: item.specialInstructions ?? null,
         price: item.price,
+        menu_item_id: item.menuItemId ?? null,
+        image_url: checkoutImageUriForCartLine(item, menuItemsByCategory),
       }));
 
       const subtotal = cart.reduce((sum, item) => sum + item.price, 0);
@@ -1656,7 +1863,7 @@ export default function OrderScreen() {
 
       const { error } = await supabase.from('orders').insert({
         user_id: uid,
-        location: selectedLocation.name,
+        store_id: selectedLocation.id,
         items: itemsPayload,
         total: Number(orderTotal.toFixed(2)),
         status: 'placed',
@@ -2082,13 +2289,6 @@ export default function OrderScreen() {
     return (
       <View style={styles.categoryStepWrap}>
         <View style={styles.categoryHeaderDivider} />
-        <LinearGradient
-          pointerEvents="none"
-          colors={['rgba(26,37,32,0.16)', 'rgba(26,37,32,0.08)', 'rgba(26,37,32,0)']}
-          start={{ x: 0.5, y: 0 }}
-          end={{ x: 0.5, y: 1 }}
-          style={styles.categoryHeaderDividerShadow}
-        />
         <ScrollView contentContainerStyle={styles.menuCategoryContent} showsVerticalScrollIndicator={false}>
           {categoryListTab === 'favorites' ? (
             <>
@@ -2463,7 +2663,7 @@ export default function OrderScreen() {
                     {selectedLocation?.id === location.id ? (
                       <View style={styles.selectedMarkerPin}>
                         <View style={styles.selectedMarkerBadge}>
-                          <ThemedText style={styles.selectedMarkerBadgeIcon}>🍊</ThemedText>
+                          <MaterialIcons name="star" size={18} color="#FFFFFF" />
                         </View>
                         <View style={styles.selectedMarkerTip} />
                       </View>
@@ -2609,11 +2809,9 @@ export default function OrderScreen() {
                 favoriteStoreIds={favoriteStoreIds}
                 now={now}
                 onSelectRow={() => setSelectedLocation(store)}
-                onOrderHere={() => {
-                  setSelectedLocation(store);
-                  handleOrderHere();
-                }}
+                onOrderHere={() => handleOrderHere(store)}
                 onToggleFavorite={toggleFavoriteStore}
+                onOpenInfo={() => setStoreInfoLocation(store)}
               />
             )}
           />
@@ -3230,6 +3428,180 @@ export default function OrderScreen() {
     );
   };
 
+  const renderStoreInfoModal = () => {
+    if (!storeInfoLocation) {
+      return null;
+    }
+    const loc = storeInfoLocation;
+    const headerPadTop = Math.max(insets.top - 36, 6);
+    const nowLine = new Date();
+    const hoursLines = storeHoursSummaryLines(loc);
+    const statusLine = getStoreStatusLine(loc, nowLine);
+    const openNow = isStoreOpen(loc, nowLine);
+    const phoneDisplay = formatPhoneDisplay(loc.phone);
+    const sheetH = Math.min(windowHeight * 0.88, 720);
+
+    const handleCall = () => {
+      if (!loc.phone) return;
+      const d = loc.phone.replace(/\D/g, '');
+      if (!d) return;
+      Linking.openURL(`tel:${d}`);
+    };
+
+    const handleDirections = () => {
+      const daddr = encodeURIComponent(loc.address);
+      if (Platform.OS === 'ios') {
+        if (loc.latitude != null && loc.longitude != null) {
+          const q = encodeURIComponent(loc.name);
+          Linking.openURL(`http://maps.apple.com/?ll=${loc.latitude},${loc.longitude}&q=${q}`);
+        } else {
+          Linking.openURL(`http://maps.apple.com/?daddr=${daddr}`);
+        }
+        return;
+      }
+      Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${daddr}`);
+    };
+
+    const handleShare = async () => {
+      try {
+        await Share.share({
+          title: loc.name,
+          message: [loc.name, loc.address, phoneDisplay].filter(Boolean).join('\n'),
+        });
+      } catch {
+        // User cancelled or share unavailable.
+      }
+    };
+
+    return (
+      <Modal
+        visible
+        transparent
+        animationType="none"
+        statusBarTranslucent
+        {...(Platform.OS === 'ios' ? { presentationStyle: 'overFullScreen' as const } : {})}
+        onRequestClose={() => dismissStoreInfoModal()}>
+        <View style={styles.storeInfoModalRoot}>
+          <Pressable
+            style={styles.storeInfoModalBackdrop}
+            onPress={() => dismissStoreInfoModal()}
+            accessibilityRole="button"
+            accessibilityLabel="Dismiss"
+          />
+          <Animated.View
+            style={[
+              styles.storeInfoModalSheet,
+              { height: sheetH, transform: [{ translateY: storeInfoSheetTranslateY }] },
+            ]}>
+            <View style={[styles.storeInfoModalHeader, { paddingTop: headerPadTop }]}>
+              <Pressable hitSlop={12} onPress={() => toggleFavoriteStore(loc.id)}>
+                <MaterialIcons
+                  name={favoriteStoreIds.includes(loc.id) ? 'favorite' : 'favorite-border'}
+                  size={26}
+                  color={favoriteStoreIds.includes(loc.id) ? STORE_PIN_ORANGE : '#58635D'}
+                />
+              </Pressable>
+              <View style={styles.customizeModalHeaderSpacer} />
+              <Pressable
+                hitSlop={12}
+                onPress={() => dismissStoreInfoModal()}
+                accessibilityRole="button"
+                accessibilityLabel="Close">
+                <MaterialIcons name="close" size={28} color="#1A2520" />
+              </Pressable>
+            </View>
+            <ScrollView
+              style={styles.storeInfoScroll}
+              contentContainerStyle={styles.storeInfoScrollContent}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled">
+              <View style={styles.storeInfoHeroPin}>
+                <View style={styles.storeInfoHeroBadge}>
+                  <MaterialIcons name="star" size={28} color="#FFFFFF" />
+                </View>
+                <View style={styles.storeInfoHeroTip} />
+              </View>
+              <ThemedText style={styles.storeInfoStoreName}>{loc.name}</ThemedText>
+              <ThemedText style={styles.storeInfoCity}>{cityFromAddress(loc.address)}</ThemedText>
+
+              <View style={styles.storeInfoActionsRow}>
+                <Pressable
+                  style={[
+                    styles.storeInfoActionBtn,
+                    styles.storeInfoActionCall,
+                    !loc.phone && styles.storeInfoActionDisabled,
+                  ]}
+                  onPress={handleCall}
+                  disabled={!loc.phone}>
+                  <MaterialIcons name="call" size={20} color="#FFFFFF" />
+                  <Text style={styles.storeInfoActionCallText}>Call</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.storeInfoActionBtn, styles.storeInfoActionDirections]}
+                  onPress={handleDirections}>
+                  <MaterialIcons name="navigation" size={20} color="#FFFFFF" />
+                  <Text style={styles.storeInfoActionDirectionsText}>Directions</Text>
+                </Pressable>
+                <Pressable style={[styles.storeInfoActionBtn, styles.storeInfoActionShare]} onPress={handleShare}>
+                  <MaterialIcons name="share" size={20} color={CHECKOUT_LIGHT_GREEN} />
+                  <Text style={styles.storeInfoActionShareText}>Share</Text>
+                </Pressable>
+              </View>
+
+              <View style={styles.storeInfoCard}>
+                <View style={styles.storeInfoCardRow}>
+                  <MaterialIcons name="place" size={20} color={CHECKOUT_LIGHT_GREEN} />
+                  <ThemedText style={styles.storeInfoCardText}>{loc.address}</ThemedText>
+                </View>
+                {phoneDisplay ? (
+                  <View style={[styles.storeInfoCardRow, styles.storeInfoCardRowSpaced]}>
+                    <MaterialIcons name="call" size={20} color={CHECKOUT_LIGHT_GREEN} />
+                    <ThemedText style={styles.storeInfoCardText}>{phoneDisplay}</ThemedText>
+                  </View>
+                ) : null}
+              </View>
+
+              <View style={styles.storeInfoCard}>
+                <View style={styles.storeInfoHoursHeader}>
+                  <View style={styles.storeInfoHoursHeaderLeft}>
+                    <MaterialIcons name="schedule" size={20} color={CHECKOUT_LIGHT_GREEN} />
+                    <ThemedText style={styles.storeInfoHoursTitle}>Hours</ThemedText>
+                  </View>
+                  {openNow ? (
+                    <View style={styles.storeInfoOpenPill}>
+                      <View style={styles.storeInfoOpenDot} />
+                      <ThemedText style={styles.storeInfoOpenPillText}>Open now</ThemedText>
+                    </View>
+                  ) : (
+                    <ThemedText style={styles.storeInfoClosedHint} numberOfLines={2}>
+                      {statusLine.text}
+                    </ThemedText>
+                  )}
+                </View>
+                <ThemedText style={styles.storeInfoHoursLine}>{hoursLines.weekday}</ThemedText>
+                <ThemedText style={[styles.storeInfoHoursLine, styles.storeInfoHoursLineSecond]}>
+                  {hoursLines.weekend}
+                </ThemedText>
+              </View>
+            </ScrollView>
+
+            <View style={[styles.storeInfoOrderWrap, { paddingBottom: Math.max(insets.bottom, 12) }]}>
+              <Pressable
+                style={styles.storeInfoOrderButton}
+                onPress={() => {
+                  dismissStoreInfoModal(() => {
+                    void handleOrderHere(loc);
+                  });
+                }}>
+                <Text style={styles.storeInfoOrderButtonText}>Order from this store</Text>
+              </Pressable>
+            </View>
+          </Animated.View>
+        </View>
+      </Modal>
+    );
+  };
+
   const renderCheckoutScreen = () => {
     if (!checkoutOpen || !selectedLocation) {
       return null;
@@ -3460,7 +3832,7 @@ export default function OrderScreen() {
             <View style={[styles.checkoutCard, styles.checkoutRewardsCard]}>
               <View style={styles.checkoutRewardsHeader}>
                 <View style={styles.checkoutRewardsIconCircle}>
-                  <Text style={styles.checkoutRewardsEmoji}>🍊</Text>
+                  <MaterialIcons name="star" size={22} color="#FFFFFF" />
                 </View>
                 <ThemedText style={styles.checkoutRewardsSectionTitle}>REWARDS</ThemedText>
               </View>
@@ -3643,6 +4015,7 @@ export default function OrderScreen() {
     </SafeAreaView>
     {renderCheckoutScreen()}
     {renderCustomizeModal()}
+    {renderStoreInfoModal()}
     </>
   );
 }
@@ -4020,10 +4393,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#FF8A00',
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  checkoutRewardsEmoji: {
-    fontSize: 22,
-    lineHeight: 26,
   },
   checkoutRewardsSectionTitle: {
     fontSize: 12,
@@ -4684,7 +5053,7 @@ const styles = StyleSheet.create({
     borderRadius: 17,
     backgroundColor: '#FFFFFF',
     borderWidth: 2,
-    borderColor: '#FF8A00',
+    borderColor: STORE_PIN_ORANGE,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
@@ -4692,10 +5061,6 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     shadowOffset: { width: 0, height: 2 },
     elevation: 4,
-  },
-  selectedMarkerBadgeIcon: {
-    fontSize: 18,
-    lineHeight: 20,
   },
   selectedMarkerTip: {
     marginTop: -2,
@@ -4706,7 +5071,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 11,
     borderLeftColor: 'transparent',
     borderRightColor: 'transparent',
-    borderTopColor: '#FF8A00',
+    borderTopColor: STORE_PIN_ORANGE,
   },
   mapEmptyOverlay: {
     position: 'absolute',
@@ -4757,6 +5122,11 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     justifyContent: 'space-between',
   },
+  storeTitlePress: {
+    flex: 1,
+    marginRight: 8,
+    minWidth: 0,
+  },
   storeIcons: {
     flexDirection: 'row',
     gap: 6,
@@ -4769,8 +5139,223 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     fontWeight: '800',
     color: '#1C2520',
+  },
+  storeRowTextPress: {
+    alignSelf: 'stretch',
+    width: '100%',
+  },
+  storeInfoModalRoot: {
     flex: 1,
-    marginRight: 8,
+    justifyContent: 'flex-end',
+  },
+  storeInfoModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  storeInfoModalSheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    width: '100%',
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    overflow: 'hidden',
+    flexDirection: 'column',
+  },
+  storeInfoScroll: {
+    flex: 1,
+  },
+  storeInfoScrollContent: {
+    paddingHorizontal: 20,
+    paddingTop: 4,
+    paddingBottom: 12,
+  },
+  storeInfoModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingBottom: 4,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#E8EEEA',
+    backgroundColor: '#FFFFFF',
+  },
+  storeInfoHeroPin: {
+    alignSelf: 'center',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  storeInfoHeroBadge: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 2,
+    borderColor: STORE_PIN_ORANGE,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
+  },
+  storeInfoHeroTip: {
+    marginTop: -2,
+    width: 0,
+    height: 0,
+    borderLeftWidth: 9,
+    borderRightWidth: 9,
+    borderTopWidth: 14,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+    borderTopColor: STORE_PIN_ORANGE,
+  },
+  storeInfoStoreName: {
+    fontSize: 22,
+    lineHeight: 26,
+    fontWeight: '800',
+    color: '#1A2520',
+    textAlign: 'center',
+  },
+  storeInfoCity: {
+    marginTop: 4,
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#6A746F',
+    textAlign: 'center',
+  },
+  storeInfoActionsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 18,
+    marginBottom: 16,
+  },
+  storeInfoActionBtn: {
+    flex: 1,
+    minHeight: 72,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 6,
+  },
+  storeInfoActionDisabled: {
+    opacity: 0.42,
+  },
+  storeInfoActionCall: {
+    backgroundColor: CHECKOUT_LIGHT_GREEN,
+  },
+  storeInfoActionCallText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  storeInfoActionDirections: {
+    backgroundColor: STORE_PIN_ORANGE,
+  },
+  storeInfoActionDirectionsText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  storeInfoActionShare: {
+    backgroundColor: '#EEF2F0',
+  },
+  storeInfoActionShareText: {
+    color: CHECKOUT_LIGHT_GREEN,
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  storeInfoCard: {
+    backgroundColor: '#F0F4F2',
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 12,
+  },
+  storeInfoCardRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  storeInfoCardRowSpaced: {
+    marginTop: 12,
+  },
+  storeInfoCardText: {
+    flex: 1,
+    fontSize: 15,
+    lineHeight: 21,
+    fontWeight: '600',
+    color: '#2B342F',
+  },
+  storeInfoHoursHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+    gap: 8,
+  },
+  storeInfoHoursHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  storeInfoHoursTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#1A2520',
+  },
+  storeInfoOpenPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  storeInfoOpenDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#4CAF50',
+  },
+  storeInfoOpenPillText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#4CAF50',
+  },
+  storeInfoClosedHint: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#8A9890',
+    textAlign: 'right',
+  },
+  storeInfoHoursLine: {
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '600',
+    color: '#3D4A44',
+  },
+  storeInfoHoursLineSecond: {
+    marginTop: 4,
+  },
+  storeInfoOrderWrap: {
+    paddingHorizontal: 20,
+    paddingTop: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#E8EEEA',
+    backgroundColor: '#FFFFFF',
+  },
+  storeInfoOrderButton: {
+    backgroundColor: CHECKOUT_LIGHT_GREEN,
+    borderRadius: 14,
+    paddingVertical: 16,
+    alignItems: 'center',
+  },
+  storeInfoOrderButtonText: {
+    color: '#FFFFFF',
+    fontSize: 17,
+    fontWeight: '800',
   },
   storeRowMiddle: {
     position: 'relative',
@@ -4980,14 +5565,6 @@ const styles = StyleSheet.create({
   categoryHeaderDivider: {
     height: 1,
     backgroundColor: '#E3E9E5',
-  },
-  categoryHeaderDividerShadow: {
-    position: 'absolute',
-    top: 1,
-    left: 0,
-    right: 0,
-    height: 14,
-    zIndex: 2,
   },
   menuCategorySection: {
     marginBottom: 16,
